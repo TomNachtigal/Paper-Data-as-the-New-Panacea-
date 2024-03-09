@@ -11,7 +11,3 @@ We provide the code used to produce our findings in the R Markdown file, includi
 The code includes in-line comments to clarify decisions that have been made throughout to facilitate replication.
 
 The code further utilize Google Translate API to translate non-English reforms in the data, see: Google. (N.D). Cloud Translation - Google Cloud. Retrieved [Date Accessed], from https://cloud.google.com/translate. To run this section of the code, be sure to obtain appropriate API. The dataset included here includes the English version of all reforms included in our analysis.
-
-Key data objects included here:
-1. werd_2.5.rda - an R object with 
-
