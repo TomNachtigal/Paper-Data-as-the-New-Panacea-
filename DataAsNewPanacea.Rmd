@@ -1,0 +1,773 @@
+---
+title: "Code for the paper: 'Data as the New Panacea: Trends in Global Education Reforms, 1970-2018'"
+author: "Patricia Bromley, Tom Nachtigal, & Rie Kijima"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(haven)
+library(readstata13)
+library(foreign)
+library(dplyr)
+require(quanteda)
+require(quanteda.textstats)
+require(stm)
+library(beepr)
+require(tm)
+require(textreg)
+require(readtext)
+require(ggplot2)
+require(grep)
+require(stringr)
+library(ngram)
+library(googleLanguageR)
+library(tidyverse)
+library(googleAuthR)
+library(readxl)
+library(stmCorrViz)
+library(zoo)
+library(knitr)
+library(mgcv)
+library(readxl)
+```
+
+```{r data set up}
+werd <- read_excel("werd_v2.5_090423 (1).xls")
+werd[werd ==""]<-NA
+werd <- werd %>% filter(!is.na(reform_description))
+werd <- werd %>% filter(!is.na(year)) 
+werd <- werd %>% filter(year > 1969 & year < 2019) 
+```
+
+```{r translating and cleaning}
+gl_auth("my_credentials.json") # add Google translate API credentials here
+
+first_letter_upper = function(x) ifelse(is.na(x)==TRUE, NA, paste0(toupper(substr(x, 1, 1)), tolower(substring(x, 2))))
+
+poli_des <- werd$reform_description %>% 
+  sapply(., str_squish) %>%
+  sapply(., first_letter_upper) %>%
+  na.omit %>%
+  data.frame(stringsAsFactors = FALSE)
+
+detected_language <- poli_des %>% 
+  sapply(., map_chr, detect_language) %>% 
+  data.frame(check.names = FALSE)
+
+language <- detected_language$.
+
+werd$detected_language <- language
+pol_ref_nonEn_v2.5 <- filter(werd, detected_language != "en")
+
+poli_nonEn2.5 <- pol_ref_nonEn_v2.5$reform_description %>% 
+  sapply(., str_squish) %>%
+  sapply(., first_letter_upper) %>%
+  data.frame(stringsAsFactors = FALSE)
+
+translated_df <- data.frame(column1=character(), 
+                           column2=character(), 
+                           column3=character(), 
+                           stringsAsFactors=FALSE)
+
+## the next step may take a while and will charge the Google API account
+## this loop can be skipped - load the reforms that were translated below.
+for (i in 1:nrow(poli_nonEn2.5)){
+  translated_df[i,] <- 
+    data.frame(gl_translate(poli_nonEn2.5[i,], target = "en"))[1,]
+}
+
+load("translated_werd_2.5.rda") ## load the reforms already translated
+
+ref_nonEn <- translated_df$column1
+print(ref_nonEn)
+
+pol_ref_nonEn_v2.5$reform_description <- ref_nonEn
+pol_ref_nonEn_v2.5$translated <- "translated" ## added indication whether a reform was translated as a variable that can later be used to find the reforms with original language other than English.
+
+
+pol_nonEn_2.5_IDs <- pol_ref_nonEn_v2.5$reform_id
+not_translated <- werd %>% filter(!(reform_id %in% pol_nonEn_2.5_IDs))
+
+pol_ref_En <- filter(werd, detected_language == "en")
+not_translated$translated <- "non-trasnalted"
+
+werd <- rbind(not_translated, pol_ref_nonEn_v2.5)
+save(werd, file = "werd_translated_sep.rda")
+
+load("werd_translated_sep.rda") # the final translated data frame.
+
+## cleaning (the raw data includes language originating from the structure of some of the OECD/ UNESCO/ World Bank document structure. To remove this noise from the linguistic analysis - we remove it here).
+
+werd_clean <- gsub("No additional information.*", "", werd$reform_description)
+werd_clean <- gsub("PUBLISHED BY EPO IN: Comparative report", "", werd_clean)
+werd_clean <- gsub("FURTHER READING:", "", werd_clean)
+werd_clean <- gsub("PUBLISHED BY EPO IN: Country profile", "", werd_clean)
+werd_clean <- gsub("No other link", "", werd_clean)
+werd_clean <- gsub("[Cc]ompiled by UNESCO-IBE (http://www.ibe.unesco.org/)", "", werd_clean)
+werd_clean <- gsub("[Cc]ompiled by UNESCO-IBE", "", werd_clean)
+werd_clean <- gsub("World Data on Education", "", werd_clean)
+werd_clean <- gsub("country profile", "", werd_clean)
+werd_clean <- gsub("published by epo in", "", werd_clean)
+werd_clean <- gsub("http://www.ibe.unesco.org/", "", werd_clean)
+werd_clean <- gsub("UNESCO-IBE", "", werd_clean)
+
+
+werd$reform_description <- werd_clean
+
+## getting rid of duplicates
+
+werd <- werd %>% distinct(policy_description, .keep_all = TRUE)
+
+## adding a variable of number of reforms per year
+
+werd <- as.data.frame(werd)
+
+ref_per_year <- werd %>% count(year)
+ref_per_year <- as.data.frame(ref_per_year)
+ref_per_year <- ref_per_year %>% arrange(ref_per_year$n)
+werd <- inner_join(ref_per_year, werd)
+werd <-  werd %>% rename(ref_per_year = n)
+werd <- werd %>% arrange(werd$reform_id)
+
+load("werd_translated_sep.rda")
+```
+
+```{r pre-processing}
+## This section includes the code of pre-processing the reform data for topic modeling using the Quanteda package. It includes the first and final iterations (to demonstrate the selection of non-unigrams), though the process of finalizing the topic model involved many iterations that required adjusting the pre-processing procedure, from technical decisions of when to remove punctuation to more substantive semantic decisions - whether to STEM or Lemmatization, and which stop words to remove. We report these decisions in Appendix C of the paper.
+
+ref.corp <- quanteda::corpus(x= werd$reform_description,
+                             docnames = werd$reform_id,
+                             docvars = werd$year) 
+
+## First iteration: minimal list of stop words, to check whether bigrams, trigrams, and even longer n-grams hold important semantic knowledge that could improve the topic model (without limitations on these longer n-grams).
+
+augment.sw <- c(stopwords("en"), "year*", "i.e*", "e.g*", "aim*", "improv*", "de", "co", "s", "take", "will") #list of stop words
+
+ref.toks <- ref.corp %>% tokens(remove_punct = TRUE,
+                                          remove_numbers = TRUE,
+                                          remove_symbols = TRUE) %>%
+  tokens_tolower() %>% 
+  tokens_remove(".*[0-9].*", valuetype = "regex") %>%
+    tokens_remove(pattern = augment.sw) %>%
+  tokens_replace(pattern = lexicon::hash_lemmas$token, replacement = lexicon::hash_lemmas$lemma) %>%
+  lapply(function(x) gsub("[[:punct:]]", "", x)) %>%  as.tokens() %>%
+  tokens_remove(pattern = augment.sw) 
+
+# generating bigrams
+ref_bigrams <- ngram::ngram(paste(ref.toks, collapse=" "), n=2)
+read_bigrams <- get.phrasetable(ref_bigrams) 
+read_bigrams <- as.data.frame(read_bigrams)
+
+View(read_bigrams) # reading through the bigram, we chose the thredshold of frequency after which the bigrams do not make unique semantic sense to be included in our ngram data frame.
+
+read_bigrams <- filter(read_bigrams, freq > 70)
+save(read_bigrams, file = "bigrams2.5.rda")
+
+# The same process for trigrms
+ref_trigrams <- ngram::ngram(paste(ref.toks, collapse=" "), n=3)
+read_trigrams <- get.phrasetable(ref_trigrams) 
+read_trigrams <- as.data.frame(read_trigrams)
+
+View(read_trigrams)
+read_trigrams <- filter(read_trigrams, freq > 50)
+save(read_trigrams, file = "trigrams2.5.rda")
+
+# The same process for 4-grams (we found that 4-grams are not meaningful in this corpus, and therefore decided not to include them).
+
+ref_4grams <- ngram::ngram(paste(ref.toks, collapse=" "), n=4)
+read_4grams <- get.phrasetable(ref_4grams) 
+read_4grams <- as.data.frame(read_4grams)
+View(read_4grams)
+
+bigrams2.5<- read_bigrams$ngrams
+trigrams2.5 <- read_trigrams$ngrams
+
+## Final iteration of pre-processing (extended list of stop words that do not carry *unique* semantic meaning in this corpus that's helpful to differentiate between topics)
+augment.sw <- c(stopwords("en"),"never","system", "reform", "several", "comprehensive", "move", "single", "restructure", "way", "undergo", "attempt", "concept", "time", "approv*", "guideline*", "define", "set", "decision", "procedure", "resolution", "regard", "rule", "must", "document", "date", "regist*", "contain*",  "kazakhstan", "like", "singapore", "mexico", "czech", "fiji", "finland", "slovenia", "indonesia", "vietnam", "canton", "ube", "japan", "zanzibar", "thai", "uganda", "samoa", "norway", "will", "pdo", "project", "old", "addition*", "publish", "add*", "act*", "länder", "foundat*", "affair*", "agreement*", "now", "novemb*", "give*", "amend*", "ever*", "receiv*", "subsequ*", "programm", "defin", "toward*", "promot*", "various", "however", "six", "upon", "shall", "april", "september",  "appli*", "recommend*", "another", "adopt*", "gave", "launch*", "least", "concern*", "educ*", "thus", "accord*", "plan", "oper*", "term*", "plan", "provi*", "purpose", "objective*", "led", "force", "begin", "march", "create", "set", "change", "type", "made", "varios", "order", "promote", "well", "polic*", "term", "make", "main", "first", "second", "three", "includ*", "implement*", "part*", "will", "decree", "framework", "launch", "availabl*", "general", "within", "change", "new", "may", "author*", "issu*", "publish", "init*", "one", "two", "four", "sinc*", "introduc*", "provid*", "relat*", "stud*", "whole", "july", "nine", "identif*", "correspond", "per", "obtain", "august", "ten", "great", "undertaken", "januari", "throughout", "decemb*", "februari", "whose", "still", "given", "june", "juli", "educ", "furthermore", "five", "legis*", "among", "can", "becam*", "view", "consid*", "call*", "decid", "becom*", "law", "act", "article", "establish*", "northern", "ireland", "also", "goal*", "aim*", "decree", "act", "follow", "take", "fully")
+# We also include additional ngrams that seemed meaningful in the above bigram and trigram generation process, but their relatively low frequency (below the threshold) left them out, though we thought they carry relevant semantic meaning nonetheless.
+allowed.phrases1980 <-  c(bigrams2.5, trigrams2.5, "inter cultural", "improve quality education", "21st century", "global economy", "sustainable development","mother tongue", "foreign language", "out of school", "critical thinking", "child protect*", "community based", "common core", "at risk", "economic growth", "european union", "human capital", "school board", "bottom up", "independent school*", "well being", "disadvantaged students", "undeserved populations", "project-based", "monitoring and evaluation", "human rights", "ECE", "higher institutions", "labour market*", "private sector", "learning outcome*", "rural area*", "human resources", "human resources development")
+# This is an additional stop words list that is removed at the end of the tokenization procedure, as these tokens are create after removing punctuation that ties words together.
+augment.sw2 <- c("numb", "eg", "nacional", "october", "january", "february", "have", "take", "due", "profile", "make", "begin", "put", "england", "scotland", "kingdom", "often", "sen", "prsp", "alongside", "co", "školi", "taken*", "program*", "drawn", "type", "f", "octob", "zealand", "d", "e", "g", "s", "r", "ite", "da", "o", "vi", "vii", "ibe", "org", "http", "januari", "australian", "v", "etc", "folkeskol", "estonia", "nqf", "x", "t", "du", "l educ", "bmbf", "em", "h", "gom", "gce", "del", "	
+l enseign", "loi", "supérieur", "à", "gob", "m", "vanuatu", "goe", "ida", "lag", "gosl", "al", "brned", "tsc", "ndp", "goi", "likewis", "www", "i e", "b", "c", "iii", "ð", "de", "la", "y", "n", "en", "et", "el", "l" , "ii", "iv", "i", "iii", "link", "base", "wale", "leducation", "royal", "ie")
+
+augment.sw2 <- c("školi", "taken*", "program*", "drawn", "type", "f", "octob", "zealand", "d", "e", "g", "s", "r", "ite", "da", "o", "vi", "vii", "ibe", "org", "http", "januari", "australian", "v", "etc", "folkeskol", "estonia", "nqf", "x", "t", "du", "l educ", "bmbf", "em", "h", "gom", "gce", "del", "	
+l enseign", "loi", "supérieur", "à", "gob", "m", "tsc", "ndp", "goi", "likewis", "www", "i e", "b", "c", "iii", "ð", "de", "la", "y", "n", "en", "et", "el", "l" , "ii", "iv", "i", "iii", "link")
+
+ref.toks <- ref.corp %>% tokens(remove_punct = TRUE,
+                                 remove_numbers = TRUE,
+                                 remove_symbols = TRUE) %>%
+                                 tokens_tolower() %>% 
+                                 tokens_remove("country profile", valuetype = "regex") %>%
+                                 tokens_remove("published by epo in", valuetype = "regex") %>%
+                                 tokens_remove("http://www.ibe.unesco.org/", valuetype = "regex") %>%
+                                 tokens_compound(phrase(allowed.phrases))%>%
+                                 tokens_remove(pattern = augment.sw) %>%
+                                 tokens_replace(pattern = lexicon::hash_lemmas$token, replacement = lexicon::hash_lemmas$lemma) %>%
+                                 lapply(function(x) gsub("[[:punct:]]", "", x)) %>%
+                                 as.tokens() %>%
+                                 tokens_remove(".*[0-9].*", valuetype = "regex") %>%
+                                 tokens_remove(pattern = augment.sw2) 
+
+ref.dfm <- ref.toks %>% dfm() 
+ref.toks <- textstat_frequency(ref.dfm)
+View(ref.toks) # after reviewing the term frequency matrix, we decided to further trim the term-document matrix to preclude tokens below a minimum document frequency of 17, to increase the likelihood that words included in the topics carry the most meaning to describe it.
+
+ref.dfm <- ref.dfm %>% dfm_trim(min_docfreq = 17,
+                                  docfreq_type = "count")
+
+docvars(ref.dfm, "year") <- werd$year
+docvars(ref.dfm, "country") <- werd$country_name
+
+tok_summary <- textstat_summary(ref.dfm)
+tok_per_doc <- ntoken(ref.dfm)
+save(tok_per_doc, file = "tok_per_doc1980.rda")
+
+# exploring the distribution of length of documents (by number of tokens per document)
+ggplot(tok_summary, aes(x=tokens)) + 
+  geom_bar(fill='salmon') + xlim(0, 800) +
+  labs(x='words per reform')
+summary(tok_per_doc)
+sd(tok_per_doc)
+
+docvars(ref.dfm, "toknum") <- tok_per_doc
+```
+
+```{r topic modeling}
+# In this section, we convert the pre-processed data to an stm object and run topic modeling.
+ref.stm_lemma <- convert(ref.dfm_lemma, to = "stm") 
+
+load("stm2.5.rda") # the stm object can also be loaded here
+
+# Since in the process of converting to an stm object, several reforms were dropped from the data, this data frame filters them out for labeling purposes we describe below.
+
+werd_less_lemma <- werd %>% filter(reform_id != "6692" & reform_id != "8"  &reform_id != "13500" & reform_id != "5308" &reform_id != "147" & reform_id != "8730"& reform_id != "4186"  &reform_id != "13535"
+                                  &reform_id != "2908"  &reform_id != "4558" &reform_id != "162" &reform_id != "8846" &reform_id != "9092" &reform_id != "4370" &reform_id != "1595" & reform_id != "8851" &reform_id != "13538" & reform_id != "1799"  &reform_id != "9509" & reform_id != "3408"   &reform_id != "6895" & reform_id != "5290"& reform_id != "5476"    & reform_id != "4159"  & reform_id != "5405") 
+
+load("werd_less_lemma.rda") # this data frame can also be loaded here.
+
+## The next stage - decide the appropriate number of K. 
+# The first step - getting a rough sense of the range of K to fit the data: Running the topic model with 0 topics allows provides a preliminary check of the range of K (number of topics in the model) that could be appropriate to fit the data.
+mod0 <- stm(documents = ref.stm_lemma$documents,
+             vocab = ref.stm_lemma$vocab,
+             K = 0)
+
+# The second step - using the searchK function of the package to generate the appropriate metrics to analyze which K might better fit the data. The range we got from the model with 0 topics allows to give the searchK function a smaller range of potential K for exploration. 
+# Note: this step could take some time to run.
+kresult <- searchK(documents=ref.stm_lemma$documents, 
+                   vocab=ref.stm_lemma$vocab, 
+                   K = seq(45, 75, 5), 
+                   verbose = F)
+
+load("kresult2.5.rda") # The results can also be loaded here for analysis and plotting.
+
+print(kresult$results)    
+plot(kresult)
+
+# Third stage: running the topic models with K based on the results from the searchK process and analyze these models qualitatively (and with some additional plots below). The searchK step helped us narrow down the range of K that could best fit the data.
+
+mod55_lemma <- stm(documents = ref.stm_lemma$documents,
+                  vocab = ref.stm_lemma$vocab,
+                  K = 55)
+load("mod55_2.5lemma.rda") # the 55 topic-model can be loaded here
+
+plot(x = mod55_lemma,
+     type = "summary",
+     topics = 1:55,
+     labeltype = "prob",
+     n=10)
+
+mod50_lemma <- stm(documents = ref.stm_lemma$documents,
+                  vocab = ref.stm_lemma$vocab,
+                  K = 50)
+
+load("mod50_2.5lemma.rda")
+
+plot(x = mod50_lemma,
+     type = "summary",
+     topics = 1:50,
+     labeltype = "prob",
+     n=10)
+
+mod45 <- stm(documents = ref.stm$documents,
+                  vocab = ref.stm$vocab,
+                  K = 45)
+
+plot(x = mod45,
+     type = "summary",
+     topics = 1:45,
+     labeltype = "prob",
+     n=10)
+
+mod40 <- stm(documents = ref.stm$documents,
+                  vocab = ref.stm$vocab,
+                  K = 40)
+
+plot(x = mod40,
+     type = "summary",
+     topics = 1:40,
+     labeltype = "prob",
+     n=10)
+
+mod65_lemma <- stm(documents = ref.stm_lemma$documents,
+             vocab = ref.stm_lemma$vocab,
+             K = 65)
+
+plot(x = mod65_lemma,
+     type = "summary",
+     topics = 1:65,
+     labeltype = "prob",
+     n=10)
+
+mod60_lemma <- stm(documents = ref.stm_lemma$documents,
+             vocab = ref.stm_lemma$vocab,
+             K = 60)
+
+plot(x = mod60_lemma,
+     type = "summary",
+     topics = 1:60,
+     labeltype = "prob",
+     n=10)
+
+# The following set up creates plots that visualize semantic coherence and exclusivity across the above models.
+
+kprep <- prepDocuments(documents = ref.stm_lemma$documents, vocab=ref.stm_lemma$vocab, ref.stm_lemma$meta, verbose=FALSE)
+docs <- kprep$documents
+
+
+M50ExSem <- as.data.frame(cbind(c(1:50), exclusivity(mod50_lemma), semanticCoherence(model=mod50_lemma, docs), "mod50"))
+M55ExSem <- as.data.frame(cbind(c(1:55), exclusivity(mod55_lemma), semanticCoherence(model=mod55_lemma, docs), "mod55"))
+M60ExSem <- as.data.frame(cbind(c(1:60), exclusivity(mod60_lemma), semanticCoherence(model=mod60_lemma, docs), "mod60"))
+M65ExSem <- as.data.frame(cbind(c(1:65), exclusivity(mod65_lemma), semanticCoherence(model=mod65_lemma, docs), "mod65"))
+
+ModsExSem <- rbind(M50ExSem, M55ExSem, M60ExSem, M65ExSem)
+colnames(ModsExSem) <- c("K","Exclusivity", "SemanticCoherence", "Model") 
+
+ModsExSem$Exclusivity <- as.numeric(as.character(ModsExSem$Exclusivity)) 
+ModsExSem$SemanticCoherence <- as.numeric(as.character(ModsExSem$SemanticCoherence)) 
+
+options(repr.plot.width=60, repr.plot.height=10, repr.plot.res=100) 
+plotexsem <- ggplot(ModsExSem, aes(SemanticCoherence, Exclusivity, color = Model)) +
+  geom_line() +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_text(aes(label=K), nudge_x=.05, nudge_y=.05) +
+  labs(x = "Semantic coherence",
+       y = "Exclusivity",
+       title = "Comparing exclusivity and semantic coherence")
+print(plotexsem)
+
+plotexsem_semcoh <- ggplot(ModsExSem, aes(y = SemanticCoherence, color = Model)) +
+  geom_boxplot() +
+  labs(x = "Model with K Topics",
+       y = "Semantic Coherence",
+       title = "Comparing Semantic Coherence by K")
+plotexsem_semcoh
+
+plotexsem_exec <- ggplot(ModsExSem, aes(y = Exclusivity, color = Model)) +
+  geom_boxplot() +
+  labs(x = "Model with K Topics",
+       y = "Exclusivity",
+       title = "Comparing Exclusivity by K")
+plotexsem_exec
+```
+
+```{r labeling topics}
+## To label the topics, we utilized the following functions from the STM package to qualitatively analyze the topics, their most associated words (with the function 'labelTopics') and their most associated reforms (with the function 'findThoughts'). The topic number to be explored, as well as the number of words/ reforms returned by each function can be adjusted in the functions below.
+
+plot(x = mod50_lemma,
+     type = "summary",
+     topics = 1:50,
+     labeltype = "prob",
+     n=10)
+
+labelTopics(model = mod50_lemma,
+            topics = 1,
+            n = 40)
+
+findThoughts(model = mod50_lemma,
+             texts = werd_less_lemma$reform_description,
+             topics = 25,
+             n = 40)
+
+plot(mod50_lemma, type = "correlation")
+```
+
+```{r topic time plot}
+# To explore changes in topic prevalence over time, we use the STM package's function to estimate and plot time trends for each topic in the model.
+
+mod.k50 <- stm(documents = ref.stm_lemma$documents,
+           vocab = ref.stm_lemma$vocab,
+           K = 50,
+           prevalence =~ year,
+          data = ref.stm_lemma$meta,
+           verbose = F)
+
+load("mod_k50_2.5year.rda")
+
+#For the estimation formula, we 1) chose smoothing to avoid imposing a parametric form on topic prevalence changes over time, and 2) include in the formula the number of tokens in each reform (normalize for reform length) and the number of reforms per year (to account for trends in reform reporting over time).
+
+modfx.k50yr_2.5lemma <- estimateEffect(formula = 1:50 ~ s(year) + toknum + refperyear, 
+                              stmobj = mod.k50,
+                              metadata = ref.stm_lemma$meta)
+beep()
+
+load("modfx.k50yr_2.5lemma.rda")
+
+## The following custom built function adjusts the STM package's plot function to include the topic label, and most associated words, to make it facilitate the analysis.
+
+sum <- summary(mod50_lemma)
+prob <- sum$prob
+prob_1 <- prob[1,]
+class(prob_1)
+
+get_topic_summaries <- function(i) { 
+  sum <- summary(mod50_lemma)
+  prob_list <- sum$prob
+  prob <- prob_list[i,]
+  return(prob)   
+}
+
+prev_plot <- function(topic_num,topic_name) {
+
+prob <-  get_topic_summaries(topic_num)
+prob <- paste(prob, collapse = ", ")
+
+title_text <-  paste("Topic ", topic_num, " (", topic_name, ")", ": \n", prob, sep="")
+
+par(oma = c(0, 0, 2, 0))
+par(cex.main = 0.7)       # Adjust the title size (reduce to make it smaller)
+par(las = 2) 
+
+plot(x = modfx.k50yr_2.5lemma,
+     covariate = "year", 
+     model = mod.k50, 
+     topics = topic_num,
+     method = "continuous",
+     ylab = "Prevalence of topic across reforms",
+     custom.labels = title_text,
+     ylim = c(0, 0.1),
+     labeltype = "custom",
+     linecol="black"
+     )
+
+par(oma = c(0, 0, 0, 0))
+par(cex.main = 1)  # Reset title size to default
+par(las = 0)
+}
+
+## Now, we can use this function to reflect the reform label (assigned qualitatively by the researchers) and most associated words (alongside some stylistic adjustments)
+prev_plot(49, "Primary Education")
+```
+
+```{r topic scores}
+## While the STM package allows to plot any number of topics over time, our approach involves creating buckets of topics and averaging across their scores. Therefore, we extracted the topic scores from the topic model, and work with them separately to plot the buckets.
+
+## Our chosen model is the one with 50 topics. The following section generates a data frame of all of the reforms with the distribution of topic scores for each reform.
+
+topic_scores <- mod50_lemma$theta %>% as.data.frame()
+
+werd <- cbind(werd_less_lemma, topic_scores)
+
+load("werdtopics2.5.rda")
+```
+
+```{r buckets of topics}
+## The following section creates a data frame of topic score distribution for each year:
+topic_num <- 50
+annual_topic_averages <- matrix(NA, nrow = 49, ncol = topic_num+1)
+topic_titles <- colnames(topic_scores)[-1]
+i <- 1
+j <- 2
+for (x in years) {
+  annual_topic_averages[i,1] <- x
+  topic_scores_year <- topic_scores %>% filter(year == x)
+  j <- 2
+  for (n in seq(2, topic_num+1)) {
+    scores <- topic_scores_year[, n]
+    topic_mean <- mean(scores, na.rm = T)
+    annual_topic_averages[i,j] <-topic_mean
+    j <- j+1
+  }
+  i <- i+1
+}
+colnames(annual_topic_averages) <- c("year", 1:50)
+
+load("annual_topic_averages.rda")
+
+annual_topic_averages <-as.data.frame(annual_topic_averages)
+
+## The following section creates the buckets and their plots based on annual averages of topic score averages:
+
+# access & inclusion
+bucket_1 <- annual_topic_averages%>% select(1,3,4,5,13,17,19,26, 37,40,43) %>%
+  mutate(sum_column = rowSums(select(., 2:11))) %>% mutate(ave_buck = sum_column/10)
+
+gam_fit_1 <- gam(ave_buck ~ s(year), data = bucket_1)
+
+predict_data_1 <- data.frame(year = seq(min(bucket_1$year), max(bucket_1$year), length.out = 100))
+
+preds <- predict(gam_fit_1, newdata = predict_data_1, type = "response", se.fit = TRUE)
+predict_data_1$fit <- preds$fit
+predict_data_1$lwr <- preds$fit - 1.96 * preds$se.fit
+predict_data_1$upr <- preds$fit + 1.96 * preds$se.fit
+
+ggplot() +
+  geom_point(data = bucket_1, aes(x = year, y = ave_buck)) +
+  geom_line(data = predict_data_1, aes(x = year, y = fit),color = "blue") +
+  geom_ribbon(data = predict_data_1, aes(x = year, ymin = lwr, ymax = upr), alpha = 0.2, inherit.aes = FALSE) +
+  labs(x = "Year", y = "Prevalence of access and inclusion topics") +
+  scale_x_continuous(breaks = seq(from = floor(min(bucket_1$year)/5)*5, 
+                                  to = ceiling(max(bucket_1$year)/5)*5, 
+                                  by = 5)) +
+  coord_cartesian(ylim = c(0, 0.04)) +
+  theme_classic() + theme(
+   axis.text = element_text(size = 25),
+    axis.title = element_text(size = rel(2.5)),
+    axis.line = element_line(color = "black"),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 30, unit = "pt")
+  )
+
+## Rights-based topics:
+
+bucket_2 <- annual_topic_averages%>% select(1,22, 30, 39) %>%
+  mutate(sum_column = rowSums(select(., 2:3))) %>% mutate(ave_buck = sum_column/3)
+
+ggplot(bucket_2, aes(x = year, y = ave_buck)) +
+  geom_point() +
+  geom_smooth(method = "auto") +
+  labs(x = "Year", y = "Prevalence of rights-based reform topics") +
+  scale_x_continuous(breaks = seq(min(bucket_2$year), max(bucket_2$year), by = 5)) +  
+   ylim(c(0,max(bucket_2$ave_buck)))+
+  theme_classic() +
+  theme(
+   axis.text = element_text(size = 25),
+    axis.title = element_text(size = rel(2.5)),
+    axis.line = element_line(color = "black"),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 30, unit = "pt")
+  )
+
+## Management and organizations
+bucket_3 <- annual_topic_averages%>% select(1,2,9,11, 14,15,16,21,25,27, 28,33, 8, 24, 41, 44, 46,48, 49, 50)%>%
+  mutate(sum_column = rowSums(select(., 2:20))) %>% mutate(ave_buck = sum_column/19)
+
+ggplot(bucket_3, aes(x = year, y = ave_buck)) +
+  geom_point() +
+  geom_smooth(method = "auto") +
+  labs(x = "Year", y = "Prevalence of management and organization topics") +
+  scale_x_continuous(breaks = seq(min(bucket_3$year), max(bucket_3$year), by = 5)) +  
+  ylim(c(0,0.04))+
+  theme_classic() +
+  theme(
+    axis.text = element_text(size = 25),
+    axis.title = element_text(size = rel(2.3)),
+    axis.line = element_line(color = "black"),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 30, unit = "pt")
+  )
+
+## data & information
+
+bucket_4 <- annual_topic_averages%>% select(1, 20, 32, 36, 42) %>%
+  mutate(sum_column = rowSums(select(., 2:5))) %>% mutate(ave_buck = sum_column/4)
+
+
+gam_fit2 <- gam(ave_buck ~ s(year), data = bucket_4)
+
+predict_data2 <- data.frame(year = seq(min(bucket_4$year), max(bucket_4$year), length.out = 100))
+
+preds2 <- predict(gam_fit2, newdata = predict_data2, type = "response", se.fit = TRUE)
+predict_data2$fit <- preds2$fit
+predict_data2$lwr <- preds2$fit - 1.96 * preds2$se.fit
+predict_data2$upr <- preds2$fit + 1.96 * preds2$se.fit
+
+ggplot() +
+  geom_point(data = bucket_4, aes(x = year, y = ave_buck)) +
+  geom_line(data = predict_data2, aes(x = year, y = fit),color = "blue") +
+  geom_ribbon(data = predict_data2, aes(x = year, ymin = lwr, ymax = upr), alpha = 0.2, inherit.aes = FALSE) +
+  labs(x = "Year", y = "Prevalence of data and information systems topics") +
+  scale_x_continuous(breaks = seq(from = floor(min(bucket_4$year)/5)*5, 
+                                  to = ceiling(max(bucket_4$year)/5)*5, 
+                                  by = 5)) +
+  coord_cartesian(ylim = c(0, NA)) +
+  theme_classic() + theme(
+    axis.text = element_text(size = 25),
+    axis.title = element_text(size = rel(2.2)),
+    axis.line = element_line(color = "black"),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 30, unit = "pt")
+  )
+```
+
+```{r constant country cases check}
+## The following section looks into whether the trends we found in the paper are driven by new countries, so we check whether similar trends are present for countries that have reforms across the time period in our data. To this end, we divide the data to three periods to identify the constant cases, run the same bucket trends analysis as above, to then check whether these trend persist among the constant cases as well.
+
+code_NA <- werd %>% filter(is.na(country_code))
+name_NA <- werd %>% filter(is.na(country_name))
+werd_no_NA <- werd %>% filter(!is.na(country_name))
+
+period_1 <- werd_no_NA %>% filter(year<1991)
+period_2 <- werd_no_NA %>% filter(year>1990 & year < 2009)
+period_3 <- werd_no_NA %>% filter(year > 2008)
+range(period_3$year)
+
+countries_period1 <- unique(period_1$country_name) 
+countries_period2 <- unique(period_2$country_name) 
+countries_period3 <- unique(period_3$country_name) 
+
+countries_periods1_2 <- countries_period2[countries_period2 %in% countries_period1] #148
+countries_all_prds <- countries_period3[countries_period3 %in% countries_periods1_2] %>% as.data.frame() #133
+countries_alt <- countries_periods1_2[countries_periods1_2 %in% countries_period3] #the same
+print(countries_all_prds)
+
+werd$all_prds <- ifelse(werd$country_name %in% countries_all_prds, 1, 0)
+table(werd$all_prds) 
+load("werd_2.5_constant.rda")
+
+countries_werd <- unique(werd$reporting_entity)
+countries_not_all_periods <- countries_werd[!countries_werd %in% countries_all_prds]
+no_NA_all_prds <-  werd_no_NA %>% filter(all_prds == 1)
+print(unique(no_NA_all_prds$country_name))
+
+ref_per_country_period1 <- period_1 %>% count(reporting_entity)
+ref_per_country_period1 <- as.data.frame(ref_per_country_period1)
+ref_per_country_period1 <- ref_per_country_period1 %>% arrange(desc(ref_per_country_period1$n))
+print(ref_per_country_period1)
+
+ref_per_country_period2 <- period_2 %>% count(reporting_entity)
+ref_per_country_period2 <- as.data.frame(ef_per_country_period2) %>% arrange(ef_per_country_period2$n)
+print(ef_per_country_period2)
+
+ref_per_country_period3 <- period_3 %>% count(reporting_entity)
+ref_per_country_period3 <- as.data.frame(ref_per_country_period3) %>% arrange(desc(ref_per_country_period3$n))
+print(ref_per_country_period3)
+
+constant_cases <- werd %>% filter(all_prds == 1)
+years <- unique(werd_no_NA$year)
+years <- sort(years)
+range(years)
+
+topic_num <- 50
+
+constant_cases_annual_averages <- matrix(NA, nrow = 49, ncol = topic_num+1)
+topic_scores <- constant_cases %>% select(1, 11:60) 
+topic_titles <- colnames(topic_scores)[-1]
+print(topic_titles)
+i <- 1
+j <- 2
+for (x in years) {
+  constant_cases_annual_averages[i,1] <- x
+  topic_scores_year <- topic_scores %>% filter(year == x)
+  j <- 2
+  for (n in seq(2, topic_num+1)) {
+    scores <- topic_scores_year[, n]
+    topic_mean <- mean(scores, na.rm = T)
+    constant_cases_annual_averages[i,j] <-topic_mean
+    j <- j+1
+  }
+  i <- i+1
+}
+
+load("constant_cases_annual_averages.rda")
+
+constant_cases_annual_averages <-as.data.frame(constant_cases_annual_averages)
+
+# access & inclusion
+bucket_1 <- constant_cases_annual_averages%>% select(1,3,4,5,13,17,19,26, 37,40,43) %>%
+  mutate(sum_column = rowSums(select(., 2:11))) %>% mutate(ave_buck = sum_column/10)
+
+gam_fit_1 <- gam(ave_buck ~ s(year), data = bucket_1)
+
+predict_data_1 <- data.frame(year = seq(min(bucket_1$year), max(bucket_1$year), length.out = 100))
+
+preds <- predict(gam_fit_1, newdata = predict_data_1, type = "response", se.fit = TRUE)
+predict_data_1$fit <- preds$fit
+predict_data_1$lwr <- preds$fit - 1.96 * preds$se.fit
+predict_data_1$upr <- preds$fit + 1.96 * preds$se.fit
+
+ggplot() +
+  geom_point(data = bucket_1, aes(x = year, y = ave_buck)) +
+  geom_line(data = predict_data_1, aes(x = year, y = fit),color = "blue") +
+  geom_ribbon(data = predict_data_1, aes(x = year, ymin = lwr, ymax = upr), alpha = 0.2, inherit.aes = FALSE) +
+  labs(x = "Year", y = "Prevalence of access and inclusion topics") +
+  scale_x_continuous(breaks = seq(from = floor(min(bucket_1$year)/5)*5, 
+                                  to = ceiling(max(bucket_1$year)/5)*5, 
+                                  by = 5)) +
+  coord_cartesian(ylim = c(0, 0.04)) +
+  theme_classic() + theme(
+   axis.text = element_text(size = 25),
+    axis.title = element_text(size = rel(2.5)),
+    axis.line = element_line(color = "black"),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 30, unit = "pt")
+  )
+
+## Rights-based topics:
+
+bucket_2 <- constant_cases_annual_averages%>% select(1,22, 30, 39) %>%
+  mutate(sum_column = rowSums(select(., 2:3))) %>% mutate(ave_buck = sum_column/3)
+
+ggplot(bucket_2, aes(x = year, y = ave_buck)) +
+  geom_point() +
+  geom_smooth(method = "auto") +
+  labs(x = "Year", y = "Prevalence of rights-based reform topics") +
+  scale_x_continuous(breaks = seq(min(bucket_2$year), max(bucket_2$year), by = 5)) +  
+   ylim(c(0,max(bucket_2$ave_buck)))+
+  theme_classic() +
+  theme(
+   axis.text = element_text(size = 25),
+    axis.title = element_text(size = rel(2.5)),
+    axis.line = element_line(color = "black"),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 30, unit = "pt")
+  )
+
+## Management and organizations
+bucket_3 <- constant_cases_annual_averages%>% select(1,2,9,11, 14,15,16,21,25,27, 28,33, 8, 24, 41, 44, 46,48, 49, 50)%>% mutate(sum_column = rowSums(select(., 2:20))) %>% mutate(ave_buck = sum_column/19)
+
+ggplot(bucket_3, aes(x = year, y = ave_buck)) +
+  geom_point() +
+  geom_smooth(method = "auto") +
+  labs(x = "Year", y = "Prevalence of management and organization topics") +
+  scale_x_continuous(breaks = seq(min(bucket_3$year), max(bucket_3$year), by = 5)) +  
+  ylim(c(0,0.04))+
+  theme_classic() +
+  theme(
+    axis.text = element_text(size = 25),
+    axis.title = element_text(size = rel(2.3)),
+    axis.line = element_line(color = "black"),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 30, unit = "pt")
+  )
+
+## data & information
+
+bucket_4 <- constant_cases_annual_averages%>% select(1, 20, 32, 36, 42) %>%
+  mutate(sum_column = rowSums(select(., 2:5))) %>% mutate(ave_buck = sum_column/4)
+
+
+gam_fit2 <- gam(ave_buck ~ s(year), data = bucket_4)
+
+predict_data2 <- data.frame(year = seq(min(bucket_4$year), max(bucket_4$year), length.out = 100))
+
+preds2 <- predict(gam_fit2, newdata = predict_data2, type = "response", se.fit = TRUE)
+predict_data2$fit <- preds2$fit
+predict_data2$lwr <- preds2$fit - 1.96 * preds2$se.fit
+predict_data2$upr <- preds2$fit + 1.96 * preds2$se.fit
+
+ggplot() +
+  geom_point(data = bucket_4, aes(x = year, y = ave_buck)) +
+  geom_line(data = predict_data2, aes(x = year, y = fit),color = "blue") +
+  geom_ribbon(data = predict_data2, aes(x = year, ymin = lwr, ymax = upr), alpha = 0.2, inherit.aes = FALSE) +
+  labs(x = "Year", y = "Prevalence of data and information systems topics") +
+  scale_x_continuous(breaks = seq(from = floor(min(bucket_4$year)/5)*5, 
+                                  to = ceiling(max(bucket_4$year)/5)*5, 
+                                  by = 5)) +
+  coord_cartesian(ylim = c(0, NA)) +
+  theme_classic() + theme(
+    axis.text = element_text(size = 25),
+    axis.title = element_text(size = rel(2.2)),
+    axis.line = element_line(color = "black"),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 30, unit = "pt")
+  )
+```
+
+
+
+
+
+
