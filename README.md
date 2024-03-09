@@ -7,7 +7,7 @@ For this paper, we use a dataset from the World Education Reform Database, which
 See more details about the structure of WERD V2 in: Bromley, P., Kijima, R., Overbey, L., Furuta, J., Choi, M., Santos, H., Song, J., and Nachtigal, T. 2023b. World Education Reform Database (WERD), Harvard Dataverse, V2. 
 
 # Code:
-We provide the code used to produce our findings in the R Markdown file, including the data objects generated throughout the code. Our methodological approach is structural topic modeling, for which we used the STM package (Roberts, Stewart & Tingley, 2019). 
+We provide the code used to produce our findings in the R Markdown file, including key data objects generated throughout the code. Our methodological approach is structural topic modeling, for which we used the STM package (Roberts, Stewart & Tingley, 2019). 
 The code includes in-line comments to clarify decisions that have been made throughout and support replicability efforts.
 
 The code further utilize Google Translate API to translate non-English reforms in the data, see: Google. (N.D). Cloud Translation - Google Cloud. Retrieved [Date Accessed], from https://cloud.google.com/translate. To run this section of the code, be sure to obtain appropriate API. The dataset included here includes the English version of all reforms included in our analysis.
