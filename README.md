@@ -2,7 +2,7 @@
 We share here the data and code for the paper: Bromley, P. Nachtigal, T., & Kijima, R. (Forthcoming). "Data as the New Panacea: Trends in Global Education Reforms, 1970-2018", In Special Issue of Comparative Education: Global Governance and the Promissory Visions of Education, edited by M. Elfert and C. Ydesen.
 
 # Data: 
-For this paper, we use an extended dataset from the World Education Reform Database v2 (https://werd.stanford.edu/database), including reforms between the years 1970-2018 that have a reform description. The cleaning and pre-processing of the data can be traced in the code provided. Country codes and country names are subject to small edits from v2. We include here the final dataset used for topic modeling (titled "WERD_dataset.csv").
+For this paper, we use an extended dataset from the World Education Reform Database v2 (https://werd.stanford.edu/database), including reforms between 1970-2018 with a reform description. The cleaning and pre-processing of the data can be traced in the code provided. Country codes and country names are subject to small edits from v2. We include here the final dataset used for topic modeling (titled "WERD_dataset.csv").
 
 See more details about the structure of WERD V2 in: Bromley, P., Kijima, R., Overbey, L., Furuta, J., Choi, M., Santos, H., Song, J., and Nachtigal, T. 2023. World Education Reform Database (WERD), Harvard Dataverse, V2. 
 
